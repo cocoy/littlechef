@@ -118,8 +118,7 @@ def recipe(recipe):
         "Executing recipe '{0}' on node {1}".format(recipe, env.host_string))
 
     # Now create configuration and sync node
-    data = lib.get_node(env.host_string)
-    data["run_list"] = ["recipe[{0}]".format(recipe)]
+    data = {"run_list": ["recipe[{0}]".format(recipe)]}
     chef.sync_node(data)
 
 
