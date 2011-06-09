@@ -113,14 +113,14 @@ def recipe(recipe):
     """
     # Check that a node has been selected
     if not env.host_string:
-        abort('no node specified\nUsage: cook node:MYNODE recipe:MYRECIPE')
+	abort('no node specified\nUsage: cook node:MYNODE recipe:MYRECIPE')
     lib.print_header(
-        "Executing recipe '{0}' on node {1}".format(recipe, env.host_string))
+	"Executing recipe '{0}' on node {1}".format(recipe, env.host_string))
 
     # Now create configuration and sync node
-    data = {"run_list": ["recipe[{0}]".format(recipe)]}
+    data = lib.get_node(env.host_string)
+    data["run_list"] = ["recipe[{0}]".format(recipe)]
     chef.sync_node(data)
-
 
 def role(role):
     """Apply the given role to a node
