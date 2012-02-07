@@ -1,8 +1,8 @@
 #
-# Cookbook Name:: subversion
-# Attributes:: server
+# Copyright 2011, edelight GmbH
 #
-# Copyright 2009, Daniel DeLeo
+# Authors:
+#       Markus Korn <markus.korn@edelight.de>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,9 +17,16 @@
 # limitations under the License.
 #
 
-subversion Mash.new unless attribute?("subversion")
-default.subversion.repo_dir     "/srv/svn"
-default.subversion.repo_name    "repo"
-default.subversion.server_name  "svn"         # hostname of apache virtual host
-default.subversion.user         "subversion"
-default.subversion.password     "subversion"  # please override this :)
+if Chef::Config[:solo]
+
+  class Chef
+    class Environment
+      def self.load(name)
+        Chef::Log.info("Setting 'node.chef_environment' to '#{name}'")
+        Chef::Log.debug("Won't load environment data because it is not yet supported by Chef Solo")
+        return nil
+      end
+    end
+  end
+
+end

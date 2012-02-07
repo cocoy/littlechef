@@ -12,19 +12,17 @@
 #See the License for the specific language governing permissions and
 #limitations under the License.
 #
-"""LittleChef: Configuration Management using Chef without a Chef Server"""
+"""LittleChef: Configuration Management using Chef Solo"""
 import ConfigParser
 import os
 import sys
 import simplejson as json
 
-import fabric
 from fabric.api import *
 from fabric.contrib.files import append, exists
 from fabric.contrib.console import confirm
-from paramiko.config import SSHConfig as _SSHConfig
+from ssh.config import SSHConfig as _SSHConfig
 
-from littlechef.version import version
 from littlechef import solo
 from littlechef import lib
 from littlechef import chef
@@ -32,15 +30,11 @@ from littlechef.settings import cookbook_paths
 
 
 # Fabric settings
-env.loglevel = "info"
+import fabric
 fabric.state.output['running'] = False
-
-
-@hosts('setup')
-def debug():
-    """Sets logging level to debug"""
-    print "Setting Chef Solo log level to 'debug'..."
-    env.loglevel = 'debug'
+env.loglevel = "info"
+env.output_prefix = False
+__testing__ = False
 
 
 @hosts('setup')
@@ -73,124 +67,192 @@ def new_kitchen():
 
 
 @hosts('setup')
-def node(host):
-    """Select a node"""
-    if host == 'all':
-        for node in lib.get_nodes():
+def nodes_with_role(rolename):
+    """Sets a list of nodes that have the given role
+    in their run list and calls node()
+
+    """
+    nodes_in_env = []
+    nodes = lib.get_nodes_with_role(rolename)
+    if env.chef_environment is None:
+        # Pass all nodes
+        nodes_in_env = [n['name'] for n in nodes]
+    else:
+        # Only nodes in environment
+        nodes_in_env = [n['name'] for n in nodes \
+                        if n.get('chef_environment') == env.chef_environment]
+    if not len(nodes_in_env):
+        print("No nodes found with role '{0}'".format(rolename))
+        sys.exit(0)
+    return node(*nodes_in_env)
+
+
+@hosts('setup')
+def node(*nodes):
+    """Selects and configures a list of nodes. 'all' configures all nodes"""
+    if not len(nodes) or nodes[0] == '':
+        abort('No node was given')
+    elif nodes[0] == 'all':
+        # Fetch all nodes and add them to env.hosts
+        for node in lib.get_nodes(env.chef_environment):
             env.hosts.append(node['name'])
         if not len(env.hosts):
-            abort('No nodes found')
+            abort('No nodes found in /nodes/')
+        message = "Are you sure you want to configure all nodes ({0})".format(
+            len(env.hosts))
+        if env.chef_environment:
+            message += " in the {0} environment".format(env.chef_environment)
+        message += "?"
+        if not __testing__:
+            if not confirm(message):
+                abort('Aborted by user')
     else:
-        env.hosts = [host]
+        # A list of nodes was given
+        env.hosts = list(nodes)
+    env.all_hosts = list(env.hosts)  # Shouldn't be needed
+    if len(env.hosts) > 1:
+        print "Configuring nodes: {0}...".format(", ".join(env.hosts))
+
+    # Check whether another command was given in addition to "node:"
+    execute = True
+    if not(littlechef.__cooking__ and
+            'node:' not in sys.argv[-1] and
+            'nodes_with_role:' not in sys.argv[-1]):
+        # If user didn't type recipe:X, role:Y or deploy_chef, just run configure
+        for hostname in env.hosts:
+            env.host = hostname
+            env.host_string = hostname
+            lib.print_header("Configuring {0}".format(env.host))
+            # Read node data and configure node
+            node = lib.get_node(env.host)
+            if not __testing__:
+                chef.sync_node(node)
 
 
-def deploy_chef(gems="no", ask="yes", version="0.9"):
+def deploy_chef(gems="no", ask="yes", version="0.10",
+    distro_type=None, distro=None, stop_client='yes'):
     """Install chef-solo on a node"""
     if not env.host_string:
-        abort('no node specified\nUsage: cook node:MYNODE deploy_chef')
+        abort('no node specified\nUsage: fix node:MYNODES deploy_chef')
     chef_versions = ["0.9", "0.10"]
     if version not in chef_versions:
         abort('Wrong Chef version specified. Valid versions are {0}'.format(
             ", ".join(chef_versions)))
-    distro_type, distro = solo.check_distro()
-    message = '\nAre you sure you want to install Chef at the node {0}'.format(
-        env.host_string)
-    if gems == "yes":
-        message += ', using gems for "{0}"?'.format(distro)
+    if distro_type is None and distro is None:
+        distro_type, distro = solo.check_distro()
+    elif distro_type is None or distro is None:
+        abort('Must specify both or neither of distro_type and distro')
+    if ask == "yes":
+        message = '\nAre you sure you want to install Chef {0}'.format(version)
+        message += ' at the node {0}'.format(env.host_string)
+        if gems == "yes":
+            message += ', using gems for "{0}"?'.format(distro)
+        else:
+            message += ', using "{0}" packages?'.format(distro)
+        if not confirm(message):
+            abort('Aborted by user')
     else:
-        message += ', using "{0}" packages?'.format(distro)
-    if ask != "no" and not confirm(message):
-        abort('Aborted by user')
+        if gems == "yes":
+            method = 'using gems for "{0}"'.format(distro)
+        else:
+            method = '{0} using "{1}" packages'.format(version, distro)
+        print("Deploying Chef {0}...".format(method))
 
-    solo.install(distro_type, distro, gems, version)
-    solo.configure()
+    if not __testing__:
+        solo.install(distro_type, distro, gems, version, stop_client)
+        solo.configure()
 
 
 def recipe(recipe):
     """Apply the given recipe to a node
     Sets the run_list to the given recipe
     If no nodes/hostname.json file exists, it creates one
+
     """
     # Check that a node has been selected
     if not env.host_string:
-	abort('no node specified\nUsage: cook node:MYNODE recipe:MYRECIPE')
+        abort('no node specified\nUsage: fix node:MYNODES recipe:MYRECIPE')
     lib.print_header(
-	"Executing recipe '{0}' on node {1}".format(recipe, env.host_string))
+        "Applying recipe '{0}' on node {1}".format(recipe, env.host_string))
 
     # Now create configuration and sync node
     data = lib.get_node(env.host_string)
     data["run_list"] = ["recipe[{0}]".format(recipe)]
-    chef.sync_node(data)
+    if not __testing__:
+        chef.sync_node(data)
+
 
 def role(role):
     """Apply the given role to a node
     Sets the run_list to the given role
     If no nodes/hostname.json file exists, it creates one
+
     """
     # Check that a node has been selected
     if not env.host_string:
-        abort('no node specified\nUsage: cook node:MYNODE role:MYROLE')
+        abort('no node specified\nUsage: fix node:MYNODES role:MYROLE')
     lib.print_header(
-        "Applying role '{0}' to node {1}".format(role, env.host_string))
+        "Applying role '{0}' to {1}".format(role, env.host_string))
 
     # Now create configuration and sync node
     data = lib.get_node(env.host_string)
     data["run_list"] = ["role[{0}]".format(role)]
-    chef.sync_node(data)
+    if not __testing__:
+        chef.sync_node(data)
 
 
-def configure():
-    """Configure node using existing config file"""
-    # Check that a node has been selected
+def ssh(name):
+    """Executes the given command"""
     if not env.host_string:
-        msg = 'no node specified\n'
-        msg += 'Usage:\n  cook node:MYNODE configure'
-        msg += '\n  cook node:all configure'
-        abort(msg)
-    lib.print_header("Configuring {0}".format(env.host_string))
+        abort('no node specified\nUsage: fix node:MYNODES ssh:COMMAND')
+    print("\nExecuting the command '{0}' on the node {1}...".format(
+          name, env.host_string))
+    # Execute remotely using either the sudo or the run fabric functions
+    with settings(hide("warnings"), warn_only=True):
+        if name.startswith("sudo "):
+            sudo(name[5:])
+        else:
+            run(name)
 
-    # Read node data and configure node
+
+def plugin(name):
+    """Executes the selected plugin
+    Plugins are expected to be found in the kitchen's 'plugins' directory
+
+    """
+    if not env.host_string:
+        abort('No node specified\nUsage: fix node:MYNODES plugin:MYPLUGIN')
+    plug = lib.import_plugin(name)
+    print("Executing plugin '{0}' on {1}".format(name, env.host_string))
     node = lib.get_node(env.host_string)
-    chef.sync_node(node)
+    if node == {'run_list': []}:
+        node['name'] = env.host_string
+    plug.execute(node)
+    print("Finished executing plugin")
 
 
 @hosts('api')
 def list_nodes():
     """List all configured nodes"""
-    for node in lib.get_nodes():
-        lib.print_node(node)
+    lib.print_nodes(lib.get_nodes(env.chef_environment))
 
 
 @hosts('api')
 def list_nodes_detailed():
     """Show a detailed list of all nodes"""
-    for node in lib.get_nodes():
-        lib.print_node(node, detailed=True)
+    lib.print_nodes(lib.get_nodes(env.chef_environment), detailed=True)
 
 
 @hosts('api')
 def list_nodes_with_recipe(recipe):
     """Show all nodes which have asigned a given recipe"""
-    for node in lib.get_nodes():
-        if recipe in lib.get_recipes_in_node(node):
-            lib.print_node(node)
-        else:
-            for role in lib.get_roles_in_node(node):
-                with open('roles/' + role + '.json', 'r') as f:
-                    roles = json.loads(f.read())
-                    # Reuse _get_recipes_in_node to extract recipes in a role
-                    if recipe in lib.get_recipes_in_node(roles):
-                        lib.print_node(node)
-                        break
+    lib.print_nodes(lib.get_nodes_with_recipe(recipe, env.chef_environment))
 
 
 @hosts('api')
 def list_nodes_with_role(role):
     """Show all nodes which have asigned a given role"""
-    for node in lib.get_nodes():
-        recipename = 'role[' + role + ']'
-        if recipename in node.get('run_list'):
-            lib.print_node(node)
+    lib.print_nodes(lib.get_nodes_with_role(role, env.chef_environment))
 
 
 @hosts('api')
@@ -226,22 +288,44 @@ def list_roles_detailed():
         lib.print_role(role)
 
 
+@hosts('api')
+def list_plugins():
+    """Show all available plugins"""
+    lib.print_plugin_list()
+
+
 # Check that user is cooking inside a kitchen and configure authentication #
+def _check_appliances():
+    """Look around and return True or False based on whether we are in a
+    kitchen
+    """
+    names = os.listdir(os.getcwd())
+    missing = []
+    for dirname in ['nodes', 'roles', 'cookbooks', 'data_bags']:
+        if (dirname not in names) or (not os.path.isdir(dirname)):
+            missing.append(dirname)
+    if 'auth.cfg' not in names:
+        missing.append('auth.cfg')
+    return (not bool(missing)), missing
+
+
 def _readconfig():
     """Configure environment"""
     # Check that all dirs and files are present
-    for dirname in ['nodes', 'roles', 'cookbooks', 'data_bags', 'auth.cfg']:
-        if not os.path.exists(dirname):
-            msg = "Couldn't find the {0} directory. ".format(dirname)
-            msg += "Are you are executing 'cook' outside of a kitchen\n"
-            msg += "To create a new kitchen in the current directory"
-            msg += " type 'cook new_kitchen'"
-            abort(msg)
+    in_a_kitchen, missing = _check_appliances()
+    missing_str = lambda m: ' and '.join(', '.join(m).rsplit(', ', 1))
+    if not in_a_kitchen:
+        msg = "Couldn't find {0}. ".format(missing_str(missing))
+        msg += "Are you are executing 'fix' outside of a kitchen?\n"\
+               "To create a new kitchen in the current directory "\
+               " type 'fix new_kitchen'"
+        abort(msg)
     config = ConfigParser.ConfigParser()
     config.read("auth.cfg")
 
     # We expect an ssh_config file here,
     # and/or a user, (password/keyfile) pair
+    env.ssh_config = None
     try:
         ssh_config = config.get('userinfo', 'ssh-config')
     except ConfigParser.NoSectionError:
@@ -262,8 +346,6 @@ def _readconfig():
         except Exception:
             msg = "Couldn't parse the ssh-config file '{0}'".format(ssh_config)
             abort(msg)
-    else:
-        env.ssh_config = None
 
     try:
         env.user = config.get('userinfo', 'user')
@@ -286,16 +368,23 @@ def _readconfig():
     except ConfigParser.NoOptionError:
         pass
 
-    if user_specified and (not env.password and not env.key_filename):
-        abort('You need to define a password or a keypair-file in auth.cfg.')
+    if user_specified and not env.password and not env.ssh_config:
+        abort('You need to define a password or a ssh-config file in auth.cfg.')
 
 
-# Only read config if cook is being used and we are not creating a new kitchen
+# Only read config if fix is being used and we are not creating a new kitchen
 import littlechef
-if littlechef.COOKING:
+env.chef_environment = littlechef.chef_environment
+env.loglevel = littlechef.loglevel
+env.verbose = littlechef.verbose
+
+
+if littlechef.__cooking__:
     # Called from command line
+    if env.chef_environment:
+        print("\nEnvironment: {0}".format(env.chef_environment))
     if 'new_kitchen' not in sys.argv:
-         _readconfig()
+        _readconfig()
 else:
     # runner module has been imported
-    pass
+    env.ssh_config = None

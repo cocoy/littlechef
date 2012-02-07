@@ -1,8 +1,8 @@
 #
-# Cookbook Name:: subversion
-# Attributes:: server
+# Cookbook Name:: vim
+# Attributes:: default
 #
-# Copyright 2009, Daniel DeLeo
+# Copyright 2010, Opscode, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,9 +17,4 @@
 # limitations under the License.
 #
 
-subversion Mash.new unless attribute?("subversion")
-default.subversion.repo_dir     "/srv/svn"
-default.subversion.repo_name    "repo"
-default.subversion.server_name  "svn"         # hostname of apache virtual host
-default.subversion.user         "subversion"
-default.subversion.password     "subversion"  # please override this :)
+default[:vim][:extra_packages] = []

@@ -1,2 +1,6 @@
 *.pyc
 MANIFEST
+build
+dist
+littlechef.egg-info
+.coverage

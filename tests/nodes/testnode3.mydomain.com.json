@@ -1,0 +1,7 @@
+{
+    "chef_environment": "production",
+    "run_list": [
+        "recipe[subversion]",
+        "recipe[vim]"
+    ]
+}
